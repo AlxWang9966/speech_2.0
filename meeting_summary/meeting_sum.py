@@ -4,6 +4,7 @@ import openai
 import io
 import speech_fast_transcription
 import llm_analysis
+import realtime_stream  # New import for real-time transcription
 
 # 设置页面配置
 st.set_page_config(page_title="AVIA | Audio-Visual Intelligence Assistant", page_icon="🤖", layout="wide")
@@ -37,6 +38,9 @@ with col1:
     if audio_file:
         st.success("✅ Audio file uploaded successfully!")
         st.info(f"📁 File: {audio_file.name} ({audio_file.size} bytes)")
+    
+    # 新增实时转录选项
+    real_time_mode = st.checkbox("Enable simulated continuous transcription + translation", help="Experimental: stream file to Azure Speech and translate segments.")
 
 with col2:
     st.markdown("""
@@ -289,3 +293,20 @@ if process_button and (audio_file or image_file):
         use_container_width=True,
         help="Download summary as a text file"
     )
+
+# 实时转录和翻译处理 - 新增逻辑
+if audio_file and real_time_mode:
+    st.info("🛰️ Starting simulated continuous transcription & translation...")
+    with st.spinner("Streaming & processing..."):
+        rt_result = realtime_stream.continuous_transcribe_and_translate(audio_file, source_language="en-US", target_language="zh-CN")
+    if rt_result.error:
+        st.error(f"Real-time module error: {rt_result.error}")
+    else:
+        st.success("✅ Continuous session completed")
+        with st.expander("Real-time Segments", expanded=False):
+            if rt_result.final_segments:
+                st.markdown("**Original Segments:**")
+                st.write("\n".join(rt_result.final_segments))
+            if rt_result.translated_segments:
+                st.markdown("**Translated Segments:**")
+                st.write("\n".join(rt_result.translated_segments))

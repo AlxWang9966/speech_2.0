@@ -29,19 +29,15 @@ def encode_image(image):
     
     return base64.b64encode(image).decode("utf-8")
     
-def analysis_image(image, detected_language="en-US"):
+def analysis_image(image, user_prompt: str | None = None, detected_language="en-US"):
     encoded_image = encode_image(image.getvalue())
-    
-    # Simple English-only image analysis
-    question = "Please provide a detailed explanation of the image content that might be relevant to presentations, documents, or any visual information."
-    
+    default_prompt = "Provide a clear, structured analysis of the image: key objects, relationships, actions, context, and any notable details relevant for documentation or presentation."
+    question = user_prompt.strip() if user_prompt and user_prompt.strip() else default_prompt
     messages=[
-        {"role": "system", "content": "You are a helpful assistant that analyzes images and visual content. Please provide detailed explanations in English."},
+        {"role": "system", "content": "You are a helpful assistant that analyzes images and visual content. Respond succinctly and clearly in English unless otherwise instructed."},
         {"role": "user", "content": [
             {"type": "text", "text": question},
-            {"type": "image_url", "image_url": {
-                "url": f"data:image/png;base64,{encoded_image}"}
-            }
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded_image}"}}
         ]}
     ]
     result = call_openAI(messages)

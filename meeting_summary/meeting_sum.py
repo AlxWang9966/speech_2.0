@@ -1,20 +1,38 @@
 import streamlit as st
 from azure.cognitiveservices.speech import SpeechConfig, SpeechRecognizer, AudioConfig
-import openai
-import io
 import speech_fast_transcription
 import llm_analysis
-import realtime_stream  # New import for real-time transcription
+import realtime_stream  # Real-time (simulated file streaming) transcription
 import os
-import azure.cognitiveservices.speech as speechsdk  # Local live mic
-import queue, time  # New imports for queue and timing
-from azure.ai.translation.text import TextTranslationClient  # Live translation
+import azure.cognitiveservices.speech as speechsdk  # Azure Speech SDK for live microphone
+import queue, time  # Queue for thread-safe event passing; time for periodic rerun
+from azure.ai.translation.text import TextTranslationClient  # Live translation client
 from azure.core.credentials import AzureKeyCredential
 
-# 设置页面配置
+"""
+AVIA Main Streamlit App (meeting_sum.py)
+
+Features:
+- Batch audio transcription via Azure Fast Transcription API (multi-language autodetect)
+- Image upload + multimodal analysis (Azure OpenAI Vision)
+- Intelligent multilingual summary generation (Azure OpenAI)
+- Simulated continuous transcription & translation (push-stream of uploaded file)
+- Live local microphone continuous transcription (Azure Speech SDK) with optional on-the-fly translation
+
+Design Notes:
+- Background SDK callbacks MUST NOT touch Streamlit state directly (avoid ScriptRunContext warnings). They enqueue events.
+- Main thread drains a Queue each rerun to update session_state (transcription + translations).
+- Periodic rerun (st.rerun) every ~1s while live mic is running to keep UI responsive.
+- Translation for live mic performed only on finalized segments (NOT partials) for accuracy & cost efficiency.
+- Keep this script mostly orchestration; heavy logic lives in helper modules.
+
+TODO (future enhancements): browser-based WebRTC capture, diarization in live mic mode, auto language detection for live mode, export/clear live transcript buttons.
+"""
+
+# ===== Page Configuration =====
 st.set_page_config(page_title="AVIA | Audio-Visual Intelligence Assistant", page_icon="🤖", layout="wide")
 
-# 创建标题区域
+# ===== Hero Banner =====
 st.markdown("""
 <div style="text-align: center; padding: 2rem 0; background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); border-radius: 10px; margin-bottom: 2rem;">
     <h1 style="color: white; font-size: 3rem; margin: 0; text-shadow: 2px 2px 4px rgba(0,0,0,0.3);">🤖 AVIA</h1>
@@ -23,6 +41,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# ===== Main Content =====
 # 创建两列布局
 col1, col2 = st.columns(2)
 
@@ -51,43 +70,50 @@ with col1:
     live_exp = st.expander("🎙️ Live Microphone (Local Machine)", expanded=False)
     with live_exp:
         st.caption("Runs only when this app is executed on your own machine with a microphone. Not browser-based streaming.")
+        # ----- Session State Initialization (idempotent) -----
         if 'live_segments' not in st.session_state:
-            st.session_state.live_segments = []
+            st.session_state.live_segments = []          # Finalized transcript lines
         if 'live_partial' not in st.session_state:
-            st.session_state.live_partial = ''
+            st.session_state.live_partial = ''           # Current partial hypothesis
         if 'live_running' not in st.session_state:
-            st.session_state.live_running = False
+            st.session_state.live_running = False        # Live mic active flag
         if 'live_recognizer' not in st.session_state:
-            st.session_state.live_recognizer = None
+            st.session_state.live_recognizer = None      # SpeechRecognizer instance
         if 'live_queue' not in st.session_state:
-            st.session_state.live_queue = queue.Queue()
+            st.session_state.live_queue = queue.Queue()  # Thread-safe event queue
         if 'live_last_refresh' not in st.session_state:
-            st.session_state.live_last_refresh = 0.0
+            st.session_state.live_last_refresh = 0.0      # Timestamp for periodic rerun
         # Translation related state
         if 'live_translate_enabled' not in st.session_state:
             st.session_state.live_translate_enabled = False
         if 'live_target_lang' not in st.session_state:
             st.session_state.live_target_lang = 'zh-CN'
         if 'live_translations' not in st.session_state:
-            st.session_state.live_translations = []
+            st.session_state.live_translations = []      # Final translated lines aligned with segments
         if 'live_translator_client' not in st.session_state:
             st.session_state.live_translator_client = None
 
-        # Translation controls
+        # ----- Translation Controls (optional) -----
         st.markdown("---")
         col_cfg_a, col_cfg_b = st.columns([1,1])
         with col_cfg_a:
             st.session_state.live_translate_enabled = st.checkbox("Enable live translation", value=st.session_state.live_translate_enabled, help="Translate finalized segments to target language")
         with col_cfg_b:
-            st.session_state.live_target_lang = st.selectbox("Target", options=['zh-CN','en-US','ja-JP','ko-KR','fr-FR','de-DE','es-ES'], index=0 if st.session_state.live_target_lang not in ['zh-CN','en-US','ja-JP','ko-KR','fr-FR','de-DE','es-ES'] else ['zh-CN','en-US','ja-JP','ko-KR','fr-FR','de-DE','es-ES'].index(st.session_state.live_target_lang), disabled=not st.session_state.live_translate_enabled)
+            st.session_state.live_target_lang = st.selectbox(
+                "Target",
+                options=['zh-CN','en-US','ja-JP','ko-KR','fr-FR','de-DE','es-ES'],
+                index=0 if st.session_state.live_target_lang not in ['zh-CN','en-US','ja-JP','ko-KR','fr-FR','de-DE','es-ES'] else ['zh-CN','en-US','ja-JP','ko-KR','fr-FR','de-DE','es-ES'].index(st.session_state.live_target_lang),
+                disabled=not st.session_state.live_translate_enabled
+            )
 
+        # ----- Control Buttons -----
         col_live_a, col_live_b = st.columns(2)
         with col_live_a:
             start_live = st.button("▶️ Start Live Mic", disabled=st.session_state.live_running)
         with col_live_b:
             stop_live = st.button("🛑 Stop", disabled=not st.session_state.live_running)
 
-        # Start logic
+        # ----- Start Live Recognition Logic -----
         if start_live and not st.session_state.live_running:
             speech_key = os.getenv('SPEECH_KEY')
             speech_region = os.getenv('SPEECH_REGION', 'eastus')
@@ -98,9 +124,10 @@ with col1:
                     speech_config_live = speechsdk.SpeechConfig(subscription=speech_key, region=speech_region)
                     speech_config_live.set_property(speechsdk.PropertyId.SpeechServiceResponse_PostProcessingOption, "TrueText")
                     audio_config_live = speechsdk.audio.AudioConfig(use_default_microphone=True)
+                    # NOTE: Language hard-coded; future enhancement: auto-detect or user selector
                     recognizer_live = speechsdk.SpeechRecognizer(speech_config=speech_config_live, language="en-US", audio_config=audio_config_live)
 
-                    # Init translator client if enabled
+                    # Initialize translator client if enabled (avoid doing this in callbacks)
                     if st.session_state.live_translate_enabled:
                         t_key = os.getenv('TRANSLATOR_KEY')
                         t_region = os.getenv('TRANSLATOR_REGION') or os.getenv('SPEECH_REGION', 'eastus')
@@ -115,10 +142,11 @@ with col1:
                             st.warning("Translator key not set; translation disabled")
                             st.session_state.live_translate_enabled = False
 
-                    # Capture queue reference so callback threads don't touch st directly
+                    # Capture queue reference (callbacks must not mutate st directly)
                     live_queue_ref = st.session_state.live_queue
 
                     def _live_recognizing(evt: speechsdk.SpeechRecognitionEventArgs):
+                        """Interim hypothesis handler (enqueue partial)."""
                         try:
                             if evt.result.reason == speechsdk.ResultReason.RecognizingSpeech:
                                 live_queue_ref.put(('partial', evt.result.text))
@@ -126,25 +154,28 @@ with col1:
                             pass
 
                     def _live_recognized(evt: speechsdk.SpeechRecognitionEventArgs):
+                        """Final segment handler (enqueue final)."""
                         try:
                             if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech and evt.result.text:
                                 live_queue_ref.put(('final', evt.result.text))
                         except Exception:
                             pass
 
-                    def _live_canceled(evt: speechsdk.SessionEventArgs):
-                        # Push a stopped marker so main thread can update state
+                    def _live_canceled(evt: speechsdk.SessionEventArgs):  # noqa: D401
+                        # Enqueue stop marker for graceful shutdown in main thread
                         try:
                             live_queue_ref.put(('stopped', None))
                         except Exception:
                             pass
 
                     def _live_stopped(evt):
+                        # Session ended normally
                         try:
                             live_queue_ref.put(('stopped', None))
                         except Exception:
                             pass
 
+                    # Wire events
                     recognizer_live.recognizing.connect(_live_recognizing)
                     recognizer_live.recognized.connect(_live_recognized)
                     recognizer_live.canceled.connect(_live_canceled)
@@ -157,7 +188,7 @@ with col1:
                 except Exception as e:
                     st.error(f"Failed to start live recognition: {e}")
 
-        # Drain queue (update UI state)
+        # ----- Drain Queue (Main Thread State Updates) -----
         while st.session_state.get('live_queue') and not st.session_state.live_queue.empty():
             kind, txt = st.session_state.live_queue.get()
             if kind == 'partial':
@@ -165,7 +196,7 @@ with col1:
             elif kind == 'final':
                 st.session_state.live_segments.append(txt)
                 st.session_state.live_partial = ''
-                # Perform translation in main thread if enabled
+                # Perform translation only for final segments
                 if st.session_state.live_translate_enabled and txt:
                     client = st.session_state.live_translator_client
                     if client:
@@ -180,7 +211,7 @@ with col1:
             elif kind == 'stopped':
                 st.session_state.live_running = False
 
-        # Stop logic
+        # ----- Stop Logic -----
         if stop_live and st.session_state.live_running and st.session_state.live_recognizer:
             try:
                 st.session_state.live_recognizer.stop_continuous_recognition()
@@ -189,7 +220,7 @@ with col1:
             except Exception as e:
                 st.error(f"Failed to stop recognizer: {e}")
 
-        # Display live output
+        # ----- Live Output Rendering -----
         if st.session_state.live_running:
             st.info("Microphone active. Speak now...")
         if st.session_state.live_partial:
@@ -203,15 +234,14 @@ with col1:
         if not st.session_state.live_running and not st.session_state.live_segments:
             st.caption("No live transcription yet.")
 
-        # Auto refresh every ~1s while running
+        # ----- Periodic Auto-Refresh (while streaming) -----
         if st.session_state.live_running:
             now = time.time()
             if now - st.session_state.live_last_refresh > 1.0:
                 st.session_state.live_last_refresh = now
                 try:
                     st.rerun()
-                except AttributeError:
-                    # Fallback for older Streamlit versions
+                except AttributeError:  # Older Streamlit fallback
                     st.experimental_rerun()
 
 with col2:
@@ -325,7 +355,7 @@ if process_button and (audio_file or image_file):
         Audio-Transkription: {transcription}
         Bildanalyse: {image_result}
 
-        Bitte erstellen Sie eine umfassende Zusammenfassung mit Fokus auf wichtige Inhalte und Informationen.
+        Bitte erstellen Sie eine umfassende Zusammenfassung mit Fokus auf wichtige Inhalte和信息。
         """,
             "ja-JP": f"""
         音声転写: {transcription}

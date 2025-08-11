@@ -9,7 +9,6 @@ import llm_analysis
     keywords="Azure OpenAI Vision"
 )
 def run():
-    st.subheader("🖼️ Visual Content Recognition")
     image_file = st.file_uploader("Select image", type=["jpg","jpeg","png"])
     if image_file and st.button("Analyze"):
         with st.spinner("Analyzing image..."):

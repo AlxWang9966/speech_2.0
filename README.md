@@ -74,13 +74,6 @@ Open http://localhost:8501
    - Upload image (png/jpg/jpeg/webp/gif) + optional instruction prompt.
    - Vision model returns structured description / analysis; download result.
 
-## Key Implementation Details
-
-- Queue-driven UI: Background SDK events push tuples to a thread-safe queue; main script drains and triggers selective reruns.
-- Direct stdout streaming: Speech recognizing/recognized callbacks write partial and final lines directly (no Streamlit state mutation inside threads).
-- Fast Transcription resilience: Progressive fallbacks (full features → no diarization → stereo) for higher success rates.
-- One-shot translation: Entire transcript translated once to avoid flicker & cost.
-
 ## Add Your Own Scenario
 Create `meeting_summary/scenarios/new_feature.py`:
 ```python
@@ -93,12 +86,6 @@ def run():
 ```
 It auto-appears on the home grid.
 
-## Roadmap (Short)
-- Display diarization speakers in UI
-- Clipboard copy & richer export formats (PDF/JSON)
-- REST API surface for automation
-- Additional analytics (keywords / sentiment)
-
 ## Troubleshooting
 | Issue | Fix |
 |-------|-----|
@@ -106,7 +93,3 @@ It auto-appears on the home grid.
 | Translation blank | Ensure TRANSLATOR_KEY + REGION + ENDPOINT; occurs only after Stop. |
 | Partial lag | Lower `PARTIAL_RERUN_INTERVAL` in `live_mic.py` (risk higher CPU). |
 | Fast transcription fails | See terminal fallbacks log; verify API version & region. |
-
----
-
-AVIA focuses on a clean, minimal core: fast capture, accurate transcription, and concise intelligent summaries with minimal moving parts.

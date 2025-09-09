@@ -1,182 +1,112 @@
-# AVIA - Audio-Visual Intelligence Assistant
+# AVIA – Audio · Visual · Intelligence Assistant
 
-🎯 **AVIA** is a comprehensive multi-language audio and visual content analysis platform built with Streamlit. It combines Azure AI Services with OpenAI's GPT-4 to provide intelligent transcription, analysis, and summarization capabilities across 7+ languages, transforming from a simple meeting assistant into a professional content intelligence solution.
+AVIA is a lightweight, modular Streamlit app that turns raw audio (live or file) and images into structured insight. It combines Azure Speech (SDK + Fast Transcription REST), Azure Translator, and Azure OpenAI (GPT‑4o text + vision) with a small scenario plug‑in pattern.
 
-## 🌟 Major Features & Capabilities
+## Core Features
 
-### 🎤 Multi-Language Audio Processing
-- **7-Language Support**: English, Chinese (Simplified), Spanish, French, German, Japanese, Korean
-- **Automatic Language Detection**: Smart detection and processing without manual language selection
-- **Speaker Diarization**: Identifies different speakers in multi-participant audio
-- **Azure Fast Transcription API**: Latest 2024-11-15 API for high-accuracy transcription
-- **Multiple Audio Formats**: WAV, MP3, M4A support
+| Area | What You Get |
+|------|--------------|
+| Live Mic | Real‑time partial + final captions (UI + instant terminal), optional post‑stop full translation, optional TrueText cleanup |
+| Audio File Upload | Auto language detection (7 locales), resilient fast transcription (diarization fallbacks), custom summary prompt, downloadable results |
+| Image Analysis | GPT‑4o vision description + optional custom prompt instructions |
+| Multi‑Language | en-US, zh-CN, es-ES, fr-FR, de-DE, ja-JP, ko-KR (detection for uploads) |
+| Exports | Download transcription, summary, and image analysis outputs as text |
+| Architecture | Scenario registry, queue-based UI updates, direct stdout streaming for <100ms terminal captions |
 
-### 🖼️ Advanced Image Analysis
-- **Content Analysis**: Comprehensive image content understanding and description
-- **OCR Capabilities**: Text extraction from images with multi-language support
-- **Format Support**: JPG, JPEG, PNG formats
-- **Context-Aware Analysis**: Image analysis adapts to detected audio language
-
-### 🤖 Intelligent Content Summarization
-- **Multi-Modal Integration**: Combines audio transcription and image analysis results
-- **Language-Adaptive Processing**: Generates summaries in the detected content language
-- **Custom Prompts**: User-defined analysis instructions for specialized content
-- **Comprehensive Output**: Key insights, important information, and actionable summaries
-
-### 🎨 Professional User Interface
-- **Modern Design**: Gradient-based professional interface with AVIA branding
-- **Responsive Layout**: Two-column design optimized for desktop and mobile
-- **Progress Indicators**: Real-time processing status and completion feedback
-- **Multi-Language UI**: Interface labels adapt to detected content language
-- **Download Functionality**: Export transcriptions and summaries as text files
-
-## 🚀 Major Updates & Transformations
-
-### Complete Rebranding (Meeting Assistant → AVIA)
-- ✅ **New Identity**: Transformed from "Meeting Assistant" to "Audio-Visual Intelligence Assistant (AVIA)"
-- ✅ **Professional Branding**: Modern gradient headers, consistent color scheme, professional typography
-- ✅ **Content Generalization**: Removed meeting-specific terminology for broader content applicability
-- ✅ **Enhanced User Experience**: Improved visual hierarchy and intuitive navigation
-
-### Technical Infrastructure Overhaul
-- ✅ **Multi-Language Implementation**: Expanded from Chinese-only to 7-language support with auto-detection
-- ✅ **API Modernization**: Upgraded to Azure Fast Transcription API 2024-11-15
-- ✅ **Code Simplification**: Reduced speech transcription from complex fallback logic to clean 45-line implementation
-- ✅ **Error Handling**: Robust error management and user feedback systems
-- ✅ **Performance Optimization**: Streamlined processing pipeline for faster results
-
-### Enhanced Analysis Capabilities
-- ✅ **Generalized Prompts**: Updated from meeting-specific to universal content analysis across all languages
-- ✅ **Context-Aware Processing**: Content analysis adapts based on detected language and content type
-- ✅ **Multi-Modal Integration**: Seamless combination of audio and visual content analysis
-- ✅ **Custom Analysis Options**: User-defined prompts for specialized content requirements
-
-## 📁 File Structure
-
+## Architecture Snapshot
 ```
-speech_2.0/
-├── README.md                           # Project documentation
-├── meeting_summary/                    # Main application directory
-│   ├── meeting_sum.py                 # Main AVIA application
-│   ├── llm_analysis.py               # OpenAI GPT-4 integration
-│   ├── speech_fast_transcription.py  # Azure Speech service integration
-│   └── .env                          # Azure API credentials (excluded from git)
-└── speech_to_text/                    # Legacy speech processing modules
-    ├── speech_ASR.py                  # Legacy ASR implementation
-    └── text_queue.py                  # Text processing utilities
+meeting_summary/
+  meeting_sum.py            # App shell + scenario registry UI
+  scenarios/
+    live_mic.py             # Live mic streaming + optional translation
+    audio_file_summary.py   # File upload transcription + summary
+    image_analysis.py       # Image + optional custom prompt vision analysis
+  llm_analysis.py           # Text + vision analysis helpers (Azure OpenAI)
+  speech_fast_transcription.py  # Fast REST transcription w/ fallbacks
+speech_to_text/ (legacy)    # Older prototypes (not required for new flows)
 ```
 
-## 🛠️ Installation & Setup
+Live mic latency path: Azure Speech callbacks → (a) direct terminal print (no Streamlit context) + (b) queue → UI drain → throttled rerun (80ms min). Translation computed once after Stop for stability.
 
-### Prerequisites
-- Python 3.8+
-- Azure OpenAI Service account
-- Azure Speech Service account
-- Azure Translator Service account (optional, for enhanced language support)
+## Install & Run
 
-### Installation Steps
-1. **Clone Repository**:
-   ```bash
-   git clone https://github.com/AlxWang9966/speech_2.0.git
-   cd speech_2.0/meeting_summary
-   ```
+Prereqs: Python 3.9+, Azure resources (Speech, OpenAI, optional Translator).
 
-2. **Install Dependencies**:
-   ```bash
-   pip install streamlit azure-cognitiveservices-speech openai python-dotenv
-   ```
+```bash
+git clone https://github.com/AlxWang9966/speech_2.0.git
+cd speech_2.0/meeting_summary
+pip install -r requirements.txt  # If present
+# or minimal:
+pip install streamlit azure-cognitiveservices-speech azure-ai-translation openai requests python-dotenv
+```
 
-3. **Configure Environment**:
-   Create `.env` file in the `meeting_summary` directory with your Azure credentials:
-   ```env
-   AZURE_OPENAI_API_KEY=your_openai_key
-   AZURE_OPENAI_ENDPOINT=https://your-endpoint.openai.azure.com/
-   AZURE_SPEECH_KEY=your_speech_key
-   AZURE_SPEECH_REGION=your_region
-   AZURE_TRANSLATOR_KEY=your_translator_key (optional)
-   AZURE_TRANSLATOR_ENDPOINT=https://api.cognitive.microsofttranslator.com/
-   AZURE_TRANSLATOR_REGION=your_region (optional)
-   ```
+Create `.env` (inside `meeting_summary/`):
+```env
+SPEECH_KEY=your_speech_key
+SPEECH_REGION=your_region
+AZURE_OPENAI_API_KEY=your_openai_key
+AZURE_OPENAI_ENDPOINT=https://your-openai-endpoint.azure.com/
+TRANSLATOR_KEY=optional_translator_key
+TRANSLATOR_REGION=your_region
+TRANSLATOR_ENDPOINT=https://api.cognitive.microsofttranslator.com/
+```
 
-4. **Run Application**:
-   ```bash
-   streamlit run meeting_sum.py
-   ```
+Run:
+```bash
+streamlit run meeting_sum.py
+```
+Open http://localhost:8501
 
-## 🔮 Potential Future Enhancements
+## Using the Scenarios
 
-### Copy-to-Clipboard Functionality
-- **Challenge**: Multiple implementation attempts faced Streamlit's stateful nature limitations
-- **Approaches Tried**: HTML/JavaScript integration, text areas, expandable code blocks
-- **Future Solution**: Consider Streamlit components or alternative clipboard integration methods
+1. Live Microphone
+   - Open “Live Mic” card → press Start → speak.
+   - Terminal shows instantaneous partial captions; UI shows merged partial + finalized segments.
+   - (Optional) Enable Translation, pick target language; final translation appears after Stop.
+   - Clear resets transcript; TrueText toggle (Advanced) for cleaner punctuation.
 
-### Advanced Features Roadmap
-- **Real-Time Processing**: Live audio transcription and analysis during recording
-- **Batch Processing**: Multiple file upload and processing capabilities
-- **Export Options**: PDF reports, Word documents, structured data formats
-- **Cloud Integration**: Direct integration with cloud storage services
-- **Collaboration Features**: Sharing and collaborative analysis capabilities
-- **Advanced Analytics**: Content trends, keyword extraction, sentiment analysis
-- **API Endpoints**: RESTful API for integration with other applications
+2. Upload Audio: Transcription + Summary
+   - Upload wav/mp3/m4a → optional custom summary prompt → Process.
+   - Auto-detects language, runs fast transcription with diarization fallbacks.
+   - Generates LLM summary; download both artifacts.
 
-### Technical Improvements
-- **Caching System**: Implement result caching for improved performance
-- **Progressive Loading**: Chunked processing for large files
-- **Enhanced Error Handling**: More granular error reporting and recovery
-- **Accessibility Features**: Screen reader support, keyboard navigation
-- **Mobile Optimization**: Enhanced mobile user experience
-- **Internationalization**: Full UI translation for all supported languages
+3. Image Understanding + Prompt
+   - Upload image (png/jpg/jpeg/webp/gif) + optional instruction prompt.
+   - Vision model returns structured description / analysis; download result.
 
-## 🔧 Technical Specifications
+## Key Implementation Details
 
-### Azure Services Integration
-- **Azure OpenAI**: GPT-4o model for content analysis and summarization
-- **Azure Speech**: Fast Transcription API 2024-11-15 with speaker diarization
-- **Azure Translator**: Multi-language translation support (optional)
+- Queue-driven UI: Background SDK events push tuples to a thread-safe queue; main script drains and triggers selective reruns.
+- Direct stdout streaming: Speech recognizing/recognized callbacks write partial and final lines directly (no Streamlit state mutation inside threads).
+- Fast Transcription resilience: Progressive fallbacks (full features → no diarization → stereo) for higher success rates.
+- One-shot translation: Entire transcript translated once to avoid flicker & cost.
 
-### Supported Languages & Locales
-- **English**: en-US
-- **Chinese (Simplified)**: zh-CN
-- **Spanish**: es-ES
-- **French**: fr-FR
-- **German**: de-DE
-- **Japanese**: ja-JP
-- **Korean**: ko-KR
+## Add Your Own Scenario
+Create `meeting_summary/scenarios/new_feature.py`:
+```python
+from . import register_scenario
+import streamlit as st
 
-### Performance Characteristics
-- **Audio Processing**: ~45-line implementation with automatic language detection
-- **Multi-Modal Analysis**: Seamless integration of audio and visual content
-- **Response Time**: Optimized for real-time user experience
-- **Scalability**: Streamlit-based architecture suitable for personal and small team use
+@register_scenario(key="my_demo", title="My Demo", description="Short desc.", keywords="Tag")
+def run():
+    st.write("Hello scenario")
+```
+It auto-appears on the home grid.
 
-## 🎯 Success Metrics
+## Roadmap (Short)
+- Display diarization speakers in UI
+- Clipboard copy & richer export formats (PDF/JSON)
+- REST API surface for automation
+- Additional analytics (keywords / sentiment)
 
-### Completed Objectives
-- ✅ **Multi-Language Support**: 7 languages with automatic detection
-- ✅ **Professional UI**: Complete AVIA rebranding and modern interface
-- ✅ **Content Generalization**: Universal applicability beyond meeting scenarios
-- ✅ **Code Simplification**: Streamlined architecture while maintaining functionality
-- ✅ **Error Resilience**: Robust error handling and user feedback
-
-### User Experience Improvements
-- ✅ **Intuitive Interface**: Professional gradient design with clear navigation
-- ✅ **Progress Feedback**: Real-time processing status and completion indicators
-- ✅ **Multi-Format Support**: Comprehensive audio and image format compatibility
-- ✅ **Download Functionality**: Easy export of transcriptions and summaries
-- ✅ **Responsive Design**: Optimized layout for various screen sizes
-
-## 🚀 Quick Start
-
-1. Navigate to the application directory and run:
-   ```bash
-   cd meeting_summary
-   streamlit run meeting_sum.py
-   ```
-
-2. Open your browser to `http://localhost:8501`
-
-3. Upload audio files or images and experience AVIA's intelligent analysis capabilities!
+## Troubleshooting
+| Issue | Fix |
+|-------|-----|
+| No mic text | Check SPEECH_KEY/REGION; microphone permission; terminal errors. |
+| Translation blank | Ensure TRANSLATOR_KEY + REGION + ENDPOINT; occurs only after Stop. |
+| Partial lag | Lower `PARTIAL_RERUN_INTERVAL` in `live_mic.py` (risk higher CPU). |
+| Fast transcription fails | See terminal fallbacks log; verify API version & region. |
 
 ---
 
-**AVIA** represents a significant evolution from a basic meeting assistant to a comprehensive audio-visual intelligence platform, demonstrating the power of combining multiple Azure AI services with modern web application design principles.
+AVIA focuses on a clean, minimal core: fast capture, accurate transcription, and concise intelligent summaries with minimal moving parts.

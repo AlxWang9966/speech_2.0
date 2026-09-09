@@ -6,6 +6,7 @@ import streamlit as st
 
 from . import register_scenario
 import llm_analysis
+import presentation as ui
 from speech_fast_transcription import (
     AZURE_FAST,
     ENGINE_LABELS,
@@ -38,13 +39,23 @@ RUN_MODES = {
 def _render_report(report):
     report_key = report.started_at_utc
     st.divider()
-    st.subheader("Saved run results")
+    ui.section_heading("Your results, in perspective", "Saved transcripts and real measurements. No inferred accuracy or rankings.")
     st.caption(
         f"{report.filename} | Started {report.started_at_utc} | "
         f"{report.repetitions} configured repetition(s) per engine | "
         f"{len(report.runs)} recorded attempt(s), including any retries"
     )
-    st.dataframe(summary_rows(report), hide_index=True, use_container_width=True)
+    summaries = summary_rows(report)
+    for row, column in zip(summaries, st.columns(len(summaries))):
+        with column:
+            seconds = row["Median request (s)"]
+            ui.metric_card(
+                row["Engine"],
+                f"{seconds:.2f} s" if seconds is not None else "Not measured",
+                f"Median request / {row['Successful requests']} successful / {row['Failed attempts']} failed attempts",
+            )
+    with st.expander("Comparison overview"):
+        st.dataframe(summaries, hide_index=True, use_container_width=True)
     st.caption(
         "Request time includes upload, service processing, and download; it is not "
         "model-only inference time. Entra sign-in/token acquisition is excluded. "
@@ -58,7 +69,7 @@ def _render_report(report):
             "MAI used clean style, which intentionally removes fillers. "
             "This changes WER/CER relative to a verbatim reference."
         )
-    with st.expander("Per-request measurements", expanded=True):
+    with st.expander("Per-request measurements"):
         st.dataframe(metrics_rows(report), hide_index=True, use_container_width=True)
     current_failures = failed_runs(report)
     for run in current_failures:
@@ -98,6 +109,7 @@ def _render_report(report):
         file_name="avia_transcription_benchmark.json",
         mime="application/json",
         key="audio_download_benchmark",
+        icon=":material/download:",
     )
     st.caption("The JSON contains transcripts, the reference, settings, timings, and raw responses, but no API keys.")
 
@@ -105,7 +117,7 @@ def _render_report(report):
     if not successful:
         st.warning("No successful transcription responses. Resolve the errors before comparing performance.")
         return
-    st.subheader("Transcripts")
+    ui.section_heading("Transcripts", "Read the results side by side. Each request keeps its own output.")
     # Show both engines at once; repetitions can contain different transcriptions.
     columns = st.columns(len(report.engines))
     for engine, column in zip(report.engines, columns):
@@ -138,7 +150,8 @@ def _render_report(report):
                     )
                     st.json({"request_definition": result.definition, "response": result.raw_response}, expanded=False)
 
-    st.subheader("Optional AI summary")
+    st.divider()
+    ui.panel_heading("AI", "Make your transcript useful", "An optional summary, separate from transcription and its measurements.")
     st.caption(
         "Summarization is a separate Azure OpenAI request. It is never included in "
         "transcription timings or reference scoring."
@@ -154,7 +167,10 @@ def _render_report(report):
     )
     prompt = st.text_area("Custom summary prompt (optional)", key="audio_summary_prompt")
     result = report.runs[selected].result
-    if st.button("Generate summary", disabled=not result.text, key="audio_generate_summary"):
+    if st.button(
+        "Generate summary", disabled=not result.text, key="audio_generate_summary",
+        icon=":material/auto_awesome:",
+    ):
         with st.spinner("Summarizing the selected transcript..."):
             try:
                 summary = llm_analysis.analysis_text(
@@ -195,12 +211,15 @@ def _render_report(report):
     keywords="File audio | MAI preview | Latency | WER / CER | Azure OpenAI summaries",
 )
 def run():
-    mode = st.radio(
-        "Transcription engine",
-        list(RUN_MODES),
-        horizontal=True,
-        key="audio_engine_mode",
-    )
+    with st.container(key="avia_panel_engines"):
+        ui.panel_heading("01", "Choose your engine", "Use one model, or compare both on exactly the same recording.")
+        mode = st.radio(
+            "Transcription engine",
+            list(RUN_MODES),
+            horizontal=True,
+            key="audio_engine_mode",
+            label_visibility="collapsed",
+        )
     engines = RUN_MODES[mode]
     has_mai = MAI_TRANSCRIBE in engines
     if has_mai:
@@ -209,145 +228,123 @@ def run():
             "This workflow sends completed audio files, not live streaming. "
             "A compatible Speech/Foundry resource and supported region are required."
         )
-    st.caption(
-        "MAI: WAV, MP3, FLAC. Azure Fast also accepts M4A. "
-        "AVIA's file limit is less than 300 MB; the actual codec must be supported by Azure."
-    )
-    audio_file = st.file_uploader(
-        "Audio file",
-        type=["wav", "mp3", "flac", "m4a"],
-        key="audio_upload",
-    )
-    audio = audio_file.getvalue() if audio_file is not None else None
-    if audio:
-        st.audio(audio, format=MIME_TYPES[Path(audio_file.name).suffix.lower()])
-        if len(audio) >= 10_000_000:
-            st.info(
-                "This is a large recording. After the browser upload, AVIA must upload it "
-                "again to Azure for each request. Allow time for upload and transcription. "
-                "Connection establishment has a 10-second timeout; upload-write and response-read "
-                "inactivity timeouts are separately set to 300 seconds."
+    errors = []
+    with st.container(key="avia_audio_columns"):
+        source_column, settings_column = st.columns([1.1, 1])
+        with source_column, st.container(key="avia_panel_audio_source"):
+            ui.panel_heading("02", "Bring your recording", "A meeting, an interview, or a thought worth keeping.")
+            audio_file = st.file_uploader(
+                "Audio file", type=["wav", "mp3", "flac", "m4a"], key="audio_upload",
+                label_visibility="collapsed",
             )
+            st.caption("WAV, MP3, FLAC / Under 300 MB. M4A is available with Azure Fast only.")
+            audio = audio_file.getvalue() if audio_file is not None else None
+            if audio:
+                st.audio(audio, format=MIME_TYPES[Path(audio_file.name).suffix.lower()])
+                if len(audio) >= 10_000_000:
+                    st.info(
+                        "This recording is uploaded again to Azure for each request. "
+                        "Allow time for the upload and transcription. Upload-write and "
+                        "response-read inactivity timeouts are each 300 seconds."
+                    )
+            languages = MAI_LANGUAGES if engines == [MAI_TRANSCRIBE] else SPEECH_LANGUAGES
+            locale = st.selectbox(
+                "Spoken language",
+                [""] + list(languages),
+                format_func=lambda value: f"{languages[value]} ({value})" if value else "Automatic detection",
+                key="audio_locale_mai" if engines == [MAI_TRANSCRIBE] else "audio_locale_shared",
+                help="For MAI, a language selection is a strong constraint, not a candidate list. Leave automatic for mixed-language audio.",
+            )
+            if not locale:
+                st.caption(
+                    "Auto detection: 7 candidate locales for Azure Fast; 60 supported languages "
+                    "for MAI. Choose the known language for a controlled single-language comparison."
+                )
+            with st.expander("Benchmark settings (optional)"):
+                reference = st.text_area(
+                    "Reference transcript (optional, for WER / CER)",
+                    key="audio_reference",
+                    placeholder="Paste the known spoken words without timestamps or speaker labels.",
+                    help="No reference means no accuracy score. Use CER for Chinese, Japanese, and other languages without word spaces.",
+                )
+                repetitions = st.number_input(
+                    "Requests per engine", min_value=1, max_value=5, value=1, step=1, key="audio_repetitions",
+                )
+                st.caption(
+                    "Requests alternate engine order across repeats. Nothing is cached or "
+                    "automatically retried. One clip cannot establish a general model ranking."
+                )
+            if reference.strip() and not normalize_transcript(reference):
+                errors.append("The reference must contain text, not just punctuation.")
+            if audio is not None:
+                for engine in engines:
+                    try:
+                        validate_audio(audio, audio_file.name, engine)
+                    except ValueError as exc:
+                        errors.append(str(exc))
 
-    languages = MAI_LANGUAGES if engines == [MAI_TRANSCRIBE] else SPEECH_LANGUAGES
-    locale = st.selectbox(
-        "Spoken language",
-        [""] + list(languages),
-        format_func=lambda value: f"{languages[value]} ({value})" if value else "Automatic detection",
-        key="audio_locale_mai" if engines == [MAI_TRANSCRIBE] else "audio_locale_shared",
-        help="For MAI, a language selection is a strong constraint, not a candidate list. Leave automatic for mixed-language audio.",
-    )
-    if not locale:
-        st.caption(
-            "Azure Fast auto-detects among AVIA's 7 candidate locales. MAI automatically "
-            "handles its 60 supported languages. For a controlled single-language comparison, "
-            "select the known language rather than comparing these different detection strategies."
-        )
-    with st.expander("Transcription settings", expanded=True):
-        first, second = st.columns(2)
-        with first:
+        with settings_column, st.container(key="avia_panel_audio_settings"):
+            ui.panel_heading("03", "Make it your own", "Keep the settings matched for a meaningful comparison.")
             diarization = st.checkbox(
-                "Identify speakers (diarization)",
-                value=True,
-                key="audio_diarization",
+                "Identify speakers (diarization)", value=True, key="audio_diarization",
                 help="Requests speaker-labeled segments. No speaker-count or speaker-accuracy metric is inferred.",
             )
             profanity = st.selectbox(
-                "Profanity filtering",
-                ["Masked", "None", "Removed", "Tags"],
-                key="audio_profanity",
+                "Profanity filtering", ["Masked", "None", "Removed", "Tags"], key="audio_profanity",
                 help="Filtering changes transcript text and therefore reference error rates.",
             )
-        with second:
-            style = st.selectbox(
-                "MAI transcript style",
-                ["verbatim", "clean"],
-                disabled=not has_mai,
-                key="audio_mai_style",
-                help="Verbatim preserves fillers and false starts. Clean removes them. Azure Fast uses its default display text.",
+            first, second = st.columns(2)
+            with first:
+                style = st.selectbox(
+                    "MAI transcript style", ["verbatim", "clean"], disabled=not has_mai, key="audio_mai_style",
+                    help="Verbatim preserves fillers and false starts. Clean removes them. Azure Fast uses its default display text.",
+                )
+            with second:
+                timestamps = st.selectbox(
+                    "MAI timestamp detail", ["word", "segment", "none"], disabled=not has_mai, key="audio_mai_timestamps",
+                    help="Azure Fast returns word timings by default. Use word for a closer feature comparison.",
+                )
+            options = TranscriptionOptions(
+                locale=locale or None, diarization=diarization, profanity_filter=profanity,
+                mai_style=style, mai_timestamps=timestamps,
             )
-            timestamps = st.selectbox(
-                "MAI timestamp detail",
-                ["word", "segment", "none"],
-                disabled=not has_mai,
-                key="audio_mai_timestamps",
-                help="Azure Fast returns word timings by default. Use word for a closer feature comparison.",
+            with st.expander("Connection and API setup"):
+                st.caption(
+                    "Configuration presence/format only, not a connectivity check. "
+                    "Credentials are read from meeting_summary/.env; no OpenAI key is needed for transcription."
+                )
+                for engine in engines:
+                    try:
+                        connection = get_connection(engine)
+                    except ValueError as exc:
+                        errors.append(f"{ENGINE_LABELS[engine]}: {exc}")
+                    else:
+                        st.write(f"**{ENGINE_LABELS[engine]}**")
+                        st.json(connection.metadata())
+                st.write(
+                    "Both engines use SPEECH_* by default. Entra mode uses the server's Azure CLI "
+                    "sign-in and a custom SPEECH_ENDPOINT. Your identity needs Speech data-plane access. "
+                    "API keys are ignored in Entra mode; key mode needs a key matching the endpoint/region."
+                )
+                st.write(
+                    "For a separate MAI resource, MAI_SPEECH_* overrides must form a complete "
+                    "configuration. No resources or authentication modes are changed automatically."
+                )
+                st.markdown(
+                    "[MAI API and languages](https://learn.microsoft.com/azure/ai-services/speech-service/mai-transcribe) "
+                    "| [Regions](https://learn.microsoft.com/azure/ai-services/speech-service/regions?tabs=llmspeech) "
+                    "| [Entra access](https://learn.microsoft.com/azure/ai-services/speech-service/role-based-access-control)"
+                )
+            for error in dict.fromkeys(errors):
+                st.warning(error)
+            run_requested = st.button(
+                "Run comparison" if len(engines) > 1 else "Transcribe audio",
+                type="primary", disabled=audio is None or bool(errors), key="audio_run",
+                use_container_width=True, icon=":material/arrow_forward:",
             )
-    options = TranscriptionOptions(
-        locale=locale or None,
-        diarization=diarization,
-        profanity_filter=profanity,
-        mai_style=style,
-        mai_timestamps=timestamps,
-    )
-    reference = st.text_area(
-        "Reference transcript (optional, for WER / CER)",
-        key="audio_reference",
-        placeholder="Paste the known spoken words without timestamps or speaker labels.",
-        help="No reference means no accuracy score. Use CER for Chinese, Japanese, and other languages without word spaces.",
-    )
-    repetitions = st.number_input(
-        "Requests per engine",
-        min_value=1,
-        max_value=5,
-        value=1,
-        step=1,
-        key="audio_repetitions",
-    )
-    st.caption(
-        f"This run sends up to {len(engines) * repetitions} request(s); Azure charges may apply. "
-        "Requests run sequentially, alternate engine order across repeats, and are not "
-        "cached or automatically retried. One clip cannot establish a general model ranking."
-    )
+            st.caption(f"Up to {len(engines) * repetitions} request(s) / Azure charges may apply / No automatic retries")
 
-    errors = []
-    if reference.strip() and not normalize_transcript(reference):
-        errors.append("The reference must contain text, not just punctuation.")
-    if audio is not None:
-        for engine in engines:
-            try:
-                validate_audio(audio, audio_file.name, engine)
-            except ValueError as exc:
-                errors.append(str(exc))
-    with st.expander("Connection and API setup"):
-        st.caption(
-            "Configuration presence/format only, not a connectivity check. "
-            "Credentials are read from meeting_summary/.env; no OpenAI key is needed for transcription."
-        )
-        for engine in engines:
-            try:
-                connection = get_connection(engine)
-            except ValueError as exc:
-                errors.append(f"{ENGINE_LABELS[engine]}: {exc}")
-            else:
-                st.write(f"**{ENGINE_LABELS[engine]}**")
-                st.json(connection.metadata())
-        st.write(
-            "Both engines use the SPEECH_* configuration by default. Set SPEECH_AUTH_MODE=entra "
-            "and SPEECH_ENDPOINT=https://<resource>.cognitiveservices.azure.com for Microsoft "
-            "Entra ID via the server's Azure CLI sign-in. Your identity needs the Cognitive "
-            "Services Speech User role or equivalent data-plane access. API keys are not used "
-            "in Entra mode. Key mode requires SPEECH_KEY and an endpoint or matching region."
-        )
-        st.write(
-            "For a separate MAI resource, use MAI_SPEECH_AUTH_MODE and MAI_SPEECH_ENDPOINT "
-            "(plus MAI_SPEECH_KEY in key mode). Overrides must form a complete configuration. "
-            "Entra sign-in is local to the computer running Streamlit, not the browser visitor."
-        )
-        st.markdown(
-            "[MAI-Transcribe-2 API and languages](https://learn.microsoft.com/azure/ai-services/speech-service/mai-transcribe) "
-            "| [Region availability](https://learn.microsoft.com/azure/ai-services/speech-service/regions?tabs=llmspeech) "
-            "| [Speech Entra access](https://learn.microsoft.com/azure/ai-services/speech-service/role-based-access-control)"
-        )
-    for error in dict.fromkeys(errors):
-        st.warning(error)
-
-    if st.button(
-        "Run comparison" if len(engines) > 1 else "Transcribe audio",
-        type="primary",
-        disabled=audio is None or bool(errors),
-        key="audio_run",
-    ):
+    if run_requested:
         progress = st.progress(0.0)
 
         def update_progress(completed, total, label):
@@ -410,3 +407,9 @@ def run():
                         st.session_state["audio_report"] = report
                 retry_progress.empty()
         _render_report(report)
+    else:
+        ui.empty_state(
+            "Your next insight starts here",
+            "Add a recording and run a transcription. Your text, measurements, and downloads will appear here.",
+            symbol="audio",
+        )

@@ -44,6 +44,12 @@ Set-Location .\meeting_summary
 
 Open `http://localhost:8501`. The `.env` location is resolved relative to the app, not the shell's current directory.
 
+### Studio layout
+
+Use the sidebar to move between Overview, Audio lab, Live captions, and Image studio. The **Appearance** control switches between warm light and charcoal dark palettes without restarting capture or sending another analysis request. Layouts adapt to the available workspace width; narrow windows stack the upload and results panels.
+
+The audio lab separates engine selection, the recording, and transcription options into numbered panels. Optional reference/repeat controls and connection details are in expanders; saved results surface measured per-engine request times before detailed tables. Image upload and analysis sit side by side on wider screens. Navigation away from live capture still waits for confirmed shutdown.
+
 ### MAI-Transcribe-2 connection
 
 MAI is selected through the **Speech transcription REST API**, not an OpenAI audio endpoint or the existing live-microphone SDK:

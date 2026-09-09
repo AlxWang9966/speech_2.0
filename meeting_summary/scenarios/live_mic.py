@@ -5,6 +5,7 @@ import hashlib
 import streamlit as st
 
 from . import register_scenario
+import presentation as ui
 from service_errors import safe_error_text
 from speech_fast_transcription import AZURE_FAST, get_connection
 from speech_streaming import LiveSpeechError, LiveSpeechSession
@@ -131,7 +132,10 @@ def _live_panel():
     except ValueError as exc:
         st.warning(str(exc))
     else:
-        st.caption(f"Speech SDK: {connection.auth_mode} | {connection.endpoint}")
+        with st.expander("Speech connection"):
+            st.caption(f"Speech SDK: {connection.auth_mode} | {connection.endpoint}")
+            st.caption("Configuration only; connection starts when you press Start.")
+    ui.panel_heading("01", "Stay in the conversation", "English captions from the microphone on this Streamlit server.")
     with st.expander("Translation after Stop"):
         st.checkbox("Translate after Stop", key="live_translate_enabled", disabled=busy)
         st.selectbox("Target language", list(TARGET_LANGUAGES), key="live_target_lang", disabled=busy)
@@ -148,9 +152,15 @@ def _live_panel():
         st.checkbox("Print final captions to the server terminal", key="live_terminal", disabled=busy)
         st.caption("Terminal output is opt-in and may be retained by your terminal. AVIA does not write transcript log files.")
     start_col, stop_col, clear_col = st.columns(3)
-    start = start_col.button("Start", key="live_start", type="primary", disabled=busy or connection is None)
-    stop = stop_col.button("Stop", key="live_stop", disabled=not busy or (session is not None and session.stopping))
-    clear = clear_col.button("Clear", key="live_clear")
+    start = start_col.button(
+        "Start", key="live_start", type="primary", disabled=busy or connection is None,
+        icon=":material/mic:", use_container_width=True,
+    )
+    stop = stop_col.button(
+        "Stop", key="live_stop", disabled=not busy or (session is not None and session.stopping),
+        icon=":material/stop:", use_container_width=True,
+    )
+    clear = clear_col.button("Clear", key="live_clear", icon=":material/delete_outline:", use_container_width=True)
     if clear:
         st.session_state.live_translate_pending = False
         if stop_live_capture():
@@ -181,16 +191,26 @@ def _live_panel():
     for notice in st.session_state.live_notices:
         st.warning(notice)
     text = " ".join(st.session_state.live_segments).strip()
-    st.subheader("Live transcription" if busy else "Saved transcription")
-    with st.container(border=True):
-        st.text(text or "No transcript yet.")
+    with st.container(key="avia_panel_captions"):
+        ui.capture_status(
+            "Live transcription" if busy else "Saved transcription" if text else "Ready when you are",
+            f"{len(st.session_state.live_segments)} final segments / English",
+        )
+        if text:
+            st.text(text)
+        elif not st.session_state.live_partial:
+            ui.empty_state(
+                "Make room for the words",
+                "Listening for speech..." if busy else "Press Start when you are ready. Final captions will collect here.",
+                symbol="mic",
+            )
         if st.session_state.live_partial:
             st.caption("Interim caption (not final):")
             st.text(st.session_state.live_partial)
     if text:
         st.download_button(
             "Download transcript", text, file_name="live_transcript.txt", mime="text/plain",
-            key="live_download", on_click="ignore",
+            key="live_download", on_click="ignore", icon=":material/download:",
         )
     if (
         not busy and st.session_state.live_translate_pending
@@ -209,12 +229,12 @@ def _live_panel():
             or saved["target"] != st.session_state.live_target_lang
         ):
             st.warning("The saved translation belongs to the earlier transcript or target language.")
-        st.subheader("Saved translation (" + TARGET_LANGUAGES[saved["target"]] + ")")
-        with st.container(border=True):
+        with st.container(key="avia_panel_translation"):
+            ui.capture_status("Saved translation", TARGET_LANGUAGES[saved["target"]])
             st.text(saved["text"])
         st.download_button(
             "Download translation", saved["text"], file_name="live_translation.txt",
-            mime="text/plain", key="live_download_translation", on_click="ignore",
+            mime="text/plain", key="live_download_translation", on_click="ignore", icon=":material/download:",
         )
 
 

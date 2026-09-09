@@ -1,1 +1,9 @@
 meeting_summary/.env
+.env
+.env.*
+!.env.example
+**/.streamlit/secrets.toml
+.venv/
+__pycache__/
+*.pyc
+*_log.txt

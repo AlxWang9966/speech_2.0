@@ -1,3 +1,6 @@
 [theme]
 base="dark"
-primaryColor="#FFFF00"
+primaryColor="#fd8ea1"
+
+[server]
+maxUploadSize=300

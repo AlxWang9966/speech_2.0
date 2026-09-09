@@ -1,231 +1,233 @@
-"""Live microphone transcription + optional post-stop translation.
+"""Live captions on a periodic fragment; SDK threads only publish queue events."""
 
-Key behaviors:
-  * Azure Speech SDK continuous recognition for partial + final results.
-  * Real-time terminal streaming (direct callback -> stdout) for minimal latency.
-  * Streamlit UI updated via an event queue (avoids touching session state inside SDK threads).
-  * One-shot full translation only after STOP (clearer, stable output).
-  * Optional TrueText post-processing (may slow partial updates slightly).
+import hashlib
 
-Simplified: removed old mirror function & extraneous session keys; terminal streaming is always on.
-"""
+import streamlit as st
 
 from . import register_scenario
-import streamlit as st
-import os, queue, time, sys, threading
-import azure.cognitiveservices.speech as speechsdk
-from azure.ai.translation.text import TextTranslationClient
-from azure.core.credentials import AzureKeyCredential
+from service_errors import safe_error_text
+from speech_fast_transcription import AZURE_FAST, get_connection
+from speech_streaming import LiveSpeechError, LiveSpeechSession
+from translation import TARGET_LANGUAGES, TranslationError, get_translation_connection, translate_text
 
-LOG_FILE = os.path.join(os.getcwd(), 'live_mic_log.txt')
 
-PARTIAL_RERUN_INTERVAL = 0.08   # minimum time between forced reruns on new partial
-PASSIVE_REFRESH_INTERVAL = 0.12 # background refresh cadence while running
+def _initialize_state():
+    for key, value in {
+        "live_session": None,
+        "live_segments": [],
+        "live_partial": "",
+        "live_status": "idle",
+        "live_errors": [],
+        "live_notices": [],
+        "live_translate_enabled": False,
+        "live_target_lang": "zh-CN",
+        "live_translation": None,
+        "live_translation_error": None,
+        "live_translate_pending": False,
+        "live_true_text": False,
+        "live_terminal": False,
+    }.items():
+        st.session_state.setdefault(key, value)
+
+
+def _busy(session):
+    return session is not None and (not session.closed or bool(session.cleanup_error))
+
+
+def _drain_events(session):
+    current = st.session_state.get("live_session")
+    if current is None or current.session_id != session.session_id:
+        return
+    for event in session.drain():
+        if event.session_id != current.session_id:
+            continue
+        if event.kind == "partial":
+            st.session_state.live_partial = event.text
+        elif event.kind == "final":
+            st.session_state.live_segments.append(event.text)
+            st.session_state.live_partial = ""
+            if st.session_state.live_terminal:
+                try:
+                    print("[AVIA caption] " + event.text)
+                except OSError as exc:
+                    notice = "Could not write terminal captions: " + safe_error_text(exc)
+                    if notice not in st.session_state.live_notices:
+                        st.session_state.live_notices.append(notice)
+        elif event.kind == "started":
+            st.session_state.live_status = "stopping" if session.stopping else "listening"
+        elif event.kind == "error":
+            st.session_state.live_errors.append(event.text)
+            st.session_state.live_translate_pending = False
+        elif event.kind == "warning":
+            st.session_state.live_notices.append(event.text)
+        elif event.kind == "closed":
+            st.session_state.live_partial = ""
+            st.session_state.live_status = "error" if st.session_state.live_errors else "stopped"
+
+
+def stop_live_capture() -> bool:
+    """Return false rather than pretending that timed-out native cleanup succeeded."""
+    _initialize_state()
+    st.session_state.live_translate_pending = False
+    session = st.session_state.live_session
+    if session is None:
+        return True
+    st.session_state.live_status = "stopping"
+    try:
+        session.stop()
+    except LiveSpeechError as exc:
+        message = safe_error_text(exc)
+        if message not in st.session_state.live_errors:
+            st.session_state.live_errors.append(message)
+        return False
+    _drain_events(session)
+    st.session_state.live_status = "error" if st.session_state.live_errors else "stopped"
+    return True
+
+
+def _clear_capture():
+    st.session_state.update({
+        "live_session": None,
+        "live_segments": [],
+        "live_partial": "",
+        "live_status": "idle",
+        "live_errors": [],
+        "live_notices": [],
+        "live_translation": None,
+        "live_translation_error": None,
+        "live_translate_pending": False,
+    })
+
+
+def _translate_saved():
+    st.session_state.live_translate_pending = False
+    text = " ".join(st.session_state.live_segments).strip()
+    target = st.session_state.live_target_lang
+    with st.spinner("Translating the stopped transcript with the configured Translator resource..."):
+        try:
+            translated = translate_text(text, target)
+        except (ValueError, TranslationError) as exc:
+            st.session_state.live_translation_error = str(exc)
+        else:
+            st.session_state.live_translation_error = None
+            st.session_state.live_translation = {
+                "text": translated,
+                "source_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "target": target,
+            }
+
+
+@st.fragment(run_every=0.25)
+def _live_panel():
+    _initialize_state()
+    session = st.session_state.live_session
+    if session is not None:
+        session.touch()
+        _drain_events(session)
+    busy = _busy(session)
+    connection = None
+    try:
+        connection = get_connection(AZURE_FAST)
+    except ValueError as exc:
+        st.warning(str(exc))
+    else:
+        st.caption(f"Speech SDK: {connection.auth_mode} | {connection.endpoint}")
+    with st.expander("Translation after Stop"):
+        st.checkbox("Translate after Stop", key="live_translate_enabled", disabled=busy)
+        st.selectbox("Target language", list(TARGET_LANGUAGES), key="live_target_lang", disabled=busy)
+        st.caption("Uses only TRANSLATOR_* settings, never the Speech resource's region or credentials.")
+        if st.session_state.live_translate_enabled:
+            try:
+                translator = get_translation_connection()
+            except ValueError as exc:
+                st.warning(str(exc))
+            else:
+                st.caption(f"Translator: {translator.auth_mode} | {translator.region} | {translator.endpoint}")
+    with st.expander("Advanced"):
+        st.checkbox("Enable TrueText post-processing (may slow captions)", key="live_true_text", disabled=busy)
+        st.checkbox("Print final captions to the server terminal", key="live_terminal", disabled=busy)
+        st.caption("Terminal output is opt-in and may be retained by your terminal. AVIA does not write transcript log files.")
+    start_col, stop_col, clear_col = st.columns(3)
+    start = start_col.button("Start", key="live_start", type="primary", disabled=busy or connection is None)
+    stop = stop_col.button("Stop", key="live_stop", disabled=not busy or (session is not None and session.stopping))
+    clear = clear_col.button("Clear", key="live_clear")
+    if clear:
+        st.session_state.live_translate_pending = False
+        if stop_live_capture():
+            _clear_capture()
+    elif start and not busy and connection is not None:
+        _clear_capture()
+        session = LiveSpeechSession(connection=connection, true_text=st.session_state.live_true_text)
+        st.session_state.live_session = session
+        st.session_state.live_status = "starting"
+        try:
+            session.start()
+        except LiveSpeechError as exc:
+            st.session_state.live_errors.append(safe_error_text(exc))
+            st.session_state.live_status = "error"
+    elif stop and busy:
+        if stop_live_capture():
+            st.session_state.live_translate_pending = st.session_state.live_translate_enabled
+    session = st.session_state.live_session
+    if session is not None:
+        _drain_events(session)
+    busy = _busy(session)
+    if busy:
+        st.info("Stopping capture..." if session.stopping else (
+            "Listening..." if st.session_state.live_status == "listening" else "Starting Speech connection..."
+        ))
+    for error in st.session_state.live_errors:
+        st.error(error)
+    for notice in st.session_state.live_notices:
+        st.warning(notice)
+    text = " ".join(st.session_state.live_segments).strip()
+    st.subheader("Live transcription" if busy else "Saved transcription")
+    with st.container(border=True):
+        st.text(text or "No transcript yet.")
+        if st.session_state.live_partial:
+            st.caption("Interim caption (not final):")
+            st.text(st.session_state.live_partial)
+    if text:
+        st.download_button(
+            "Download transcript", text, file_name="live_transcript.txt", mime="text/plain",
+            key="live_download", on_click="ignore",
+        )
+    if (
+        not busy and st.session_state.live_translate_pending
+        and text and not st.session_state.live_errors
+    ):
+        _translate_saved()
+    if st.session_state.live_translate_enabled:
+        if st.button("Translate saved transcript", disabled=busy or not text, key="live_translate") and not busy and text:
+            _translate_saved()
+    if st.session_state.live_translation_error:
+        st.error("Translation failed: " + st.session_state.live_translation_error)
+    saved = st.session_state.live_translation
+    if saved is not None:
+        if (
+            saved["source_sha256"] != hashlib.sha256(text.encode("utf-8")).hexdigest()
+            or saved["target"] != st.session_state.live_target_lang
+        ):
+            st.warning("The saved translation belongs to the earlier transcript or target language.")
+        st.subheader("Saved translation (" + TARGET_LANGUAGES[saved["target"]] + ")")
+        with st.container(border=True):
+            st.text(saved["text"])
+        st.download_button(
+            "Download translation", saved["text"], file_name="live_translation.txt",
+            mime="text/plain", key="live_download_translation", on_click="ignore",
+        )
 
 
 @register_scenario(
     key="live_mic",
-    title="Live Microphone Transcription + Translation",
-    description="Continuously transcribe local microphone audio with optional real-time translation.",
-    keywords="Azure Speech SDK - Continuous Recognition; Azure Translator"
+    title="Live Microphone - Azure Speech SDK",
+    description="English microphone captions with optional translation after Stop. This is not MAI file transcription.",
+    keywords="Speech SDK | Key or Entra | Optional post-stop Translator",
 )
 def run():
-    # --- State initialization ---
-    defaults = {
-        'live_segments': [],
-        'live_partial': '',
-        'live_running': False,
-        'live_recognizer': None,
-        'live_queue': queue.Queue(),
-        'live_last_refresh': 0.0,
-        'live_translate_enabled': False,
-        'live_target_lang': 'zh-CN',
-        'live_translator_client': None,
-        'live_full_translation': None,
-        'live_true_text': False
-    }
-    for k, v in defaults.items():
-        st.session_state.setdefault(k, v)
-
-    # --- Translation controls ---
-    with st.expander("Translation", expanded=False):
-        st.session_state.live_translate_enabled = st.checkbox("Enable", value=st.session_state.live_translate_enabled)
-        st.session_state.live_target_lang = st.selectbox(
-            "Target", ['zh-CN','en-US','ja-JP','ko-KR','fr-FR','de-DE','es-ES'],
-            index=['zh-CN','en-US','ja-JP','ko-KR','fr-FR','de-DE','es-ES'].index(st.session_state.live_target_lang),
-            disabled=not st.session_state.live_translate_enabled
-        )
-
-    with st.expander("Advanced", expanded=False):
-        st.session_state.live_true_text = st.checkbox("Enable TrueText post-processing (may slow partial captions)", value=st.session_state.live_true_text)
-        st.caption("Terminal streaming is always ON.")
-
-    c1, c2, c3 = st.columns([1,1,2])
-    start = c1.button("▶️ Start", disabled=st.session_state.live_running)
-    stop  = c2.button("🛑 Stop", disabled=not st.session_state.live_running)
-    if c3.button("🧹 Clear"):
-        st.session_state.live_segments = []
-        st.session_state.live_partial = ''
-        st.session_state.live_full_translation = None
-
-    if start and not st.session_state.live_running:
-        key, region = os.getenv('SPEECH_KEY'), os.getenv('SPEECH_REGION','eastus')
-        if not key: st.error("SPEECH_KEY missing")
-        else:
-            try:
-                cfg = speechsdk.SpeechConfig(subscription=key, region=region)
-                if st.session_state.live_true_text:
-                    cfg.set_property(speechsdk.PropertyId.SpeechServiceResponse_PostProcessingOption, "TrueText")
-                rec = speechsdk.SpeechRecognizer(speech_config=cfg, language="en-US", audio_config=speechsdk.audio.AudioConfig(use_default_microphone=True))
-                if st.session_state.live_translate_enabled:
-                    t_key = os.getenv('TRANSLATOR_KEY')
-                    if t_key:
-                        try:
-                            st.session_state.live_translator_client = TextTranslationClient(credential=AzureKeyCredential(t_key), region=os.getenv('TRANSLATOR_REGION') or region, endpoint=os.getenv('TRANSLATOR_ENDPOINT','https://api.cognitive.microsofttranslator.com'))
-                        except Exception as te: st.warning(f"Translator init failed: {te}")
-                    else:
-                        st.warning("Translator key missing")
-                        st.session_state.live_translate_enabled = False
-                # reset any previous full translation
-                st.session_state.live_full_translation = None
-                q = st.session_state.live_queue
-                # Queue population for UI (avoid touching Streamlit in background threads except via queue)
-                rec.recognizing.connect(
-                    lambda e: q.put(('partial', e.result.text)) if e.result.reason == speechsdk.ResultReason.RecognizingSpeech else None
-                )
-                rec.recognized.connect(
-                    lambda e: q.put(('final', e.result.text)) if e.result.reason == speechsdk.ResultReason.RecognizedSpeech and e.result.text else None
-                )
-
-                # Direct terminal streaming (low latency) – isolated from Streamlit session state
-                term_lock = threading.Lock()
-                term_cfg = {'last_inline_len': 0}
-
-                def _cb_recognizing(evt: speechsdk.SessionEventArgs):
-                    res = evt.result
-                    if not res or res.reason != speechsdk.ResultReason.RecognizingSpeech:
-                        return
-                    line = res.text
-                    if not line:
-                        return
-                    with term_lock:
-                        prev = term_cfg['last_inline_len']
-                        pad = ' ' * (prev - len(line)) if prev > len(line) else ''
-                        try:
-                            sys.stdout.write('\r' + line + pad)
-                            sys.stdout.flush()
-                        except Exception:
-                            pass
-                        term_cfg['last_inline_len'] = len(line)
-
-                def _cb_recognized(evt: speechsdk.SessionEventArgs):
-                    res = evt.result
-                    if not res or res.reason != speechsdk.ResultReason.RecognizedSpeech or not res.text:
-                        return
-                    text = res.text
-                    with term_lock:
-                        if term_cfg['last_inline_len']:
-                            try:
-                                sys.stdout.write('\r' + ' ' * term_cfg['last_inline_len'] + '\r')
-                                sys.stdout.flush()
-                            except Exception:
-                                pass
-                            term_cfg['last_inline_len'] = 0
-                        try:
-                            print(text)
-                        except Exception:
-                            pass
-                        try:
-                            with open(LOG_FILE, 'a', encoding='utf-8') as lf:
-                                lf.write(text + '\n')
-                        except Exception:
-                            pass
-
-                rec.recognizing.connect(_cb_recognizing)
-                rec.recognized.connect(_cb_recognized)
-                rec.session_stopped.connect(lambda _: q.put(('stopped', None)))
-                rec.canceled.connect(lambda _: q.put(('stopped', None)))
-                rec.start_continuous_recognition()
-                st.session_state.live_recognizer = rec
-                st.session_state.live_running = True
-                st.success("Started")
-            except Exception as e:
-                st.error(f"Start failed: {e}")
-
-    # --- Drain event queue into session state (UI thread safe) ---
-    q = st.session_state.live_queue
-    partial_updated = False
-    new_final = False
-    while not q.empty():
-        kind, txt = q.get()
-        if kind == 'partial':
-            st.session_state.live_partial = txt
-            partial_updated = True
-        elif kind == 'final':
-            st.session_state.live_segments.append(txt); st.session_state.live_partial = ''
-            new_final = True
-        elif kind == 'stopped': st.session_state.live_running = False
-
-    # Immediate rerun on fresh partial for snappier captioning
-    if st.session_state.live_running and partial_updated:
-        now = time.time()
-        if now - st.session_state.live_last_refresh > PARTIAL_RERUN_INTERVAL:
-            st.session_state.live_last_refresh = now
-            try: st.rerun()
-            except Exception: pass
-
-    if stop and st.session_state.live_running and st.session_state.live_recognizer:
-        try:
-            st.session_state.live_recognizer.stop_continuous_recognition(); st.session_state.live_running = False; st.success("Stopped")
-        except Exception as e: st.error(f"Stop failed: {e}")
-        # Perform one-shot full translation after stopping (if enabled)
-        if st.session_state.live_translate_enabled and st.session_state.live_segments:
-            st.session_state.live_full_translation = None  # force recompute
-    # (Terminal line cleared by callback logic.)
-
-    # --- UI Rendering (seamless partial + final) ---
-    if 'live_css_injected' not in st.session_state:
-        st.markdown("""
-        <style>
-          .live-trans-box {background:#fff;border:1px solid #e1e5ec;border-radius:10px;padding:.75rem .9rem;min-height:140px;font-size:.85rem;line-height:1.15rem;white-space:pre-wrap;}
-          .live-partial {color:#6a3fb4;font-style:italic;opacity:.85;}
-          .live-empty {color:#8a94a3;}
-        </style>
-        """, unsafe_allow_html=True)
-        st.session_state.live_css_injected = True
-
-    if st.session_state.live_running:
-        st.markdown("<div style='display:inline-flex;align-items:center;gap:.5rem;background:#ffeef5;border:1px solid #ffb9d0;color:#c5004f;font-size:.7rem;font-weight:600;padding:.4rem .7rem;border-radius:30px;margin:.4rem 0 .4rem'>🔴 Listening...</div>", unsafe_allow_html=True)
-    final_text = " ".join(st.session_state.live_segments).strip()
-    if st.session_state.live_running:
-        if st.session_state.live_partial:
-            html_text = f"{final_text + ' ' if final_text else ''}<span class='live-partial'>{st.session_state.live_partial}</span>"
-        else:
-            html_text = final_text if final_text else "<span class='live-empty'>Capturing…</span>"
-    else:
-        html_text = final_text if final_text else "<span class='live-empty'>No transcript yet.</span>"
-    st.markdown("**Transcription (live)**" if st.session_state.live_running else "**Final Transcription**")
-    st.markdown(f"<div class='live-trans-box'>{html_text}</div>", unsafe_allow_html=True)
-
-    # Show translation only after stop (one-shot); attempt computation if missing
-    if not st.session_state.live_running and st.session_state.live_translate_enabled and st.session_state.live_segments:
-        if st.session_state.live_full_translation is None:
-            full_text = " ".join(st.session_state.live_segments)
-            client = st.session_state.live_translator_client
-            if client:
-                try:
-                    tr = client.translate(body=[full_text], to_language=[st.session_state.live_target_lang])
-                    st.session_state.live_full_translation = tr[0]['translations'][0]['text']
-                except Exception as e:
-                    st.session_state.live_full_translation = f"[Translation failed: {e}]"
-            else:
-                st.session_state.live_full_translation = '[Translator not configured]'
-        trans_display = st.session_state.live_full_translation or '<span style="color:#8a94a3">Translating...</span>'
-        st.markdown(f"**Translation ({st.session_state.live_target_lang})**")
-        st.markdown(f"<div style='background:#f7f4ff;border:1px solid #d6cbf5;border-radius:10px;padding:.6rem .75rem;min-height:80px;font-size:.85rem;line-height:1.1rem;color:#1f2530;'>{trans_display}</div>", unsafe_allow_html=True)
-
-    # Passive periodic refresh (helps advance UI if no new partial triggers rerun)
-    if st.session_state.live_running and time.time() - st.session_state.live_last_refresh > PASSIVE_REFRESH_INTERVAL:
-        st.session_state.live_last_refresh = time.time()
-        try: st.rerun()
-        except Exception: pass
+    st.caption(
+        "Captures the microphone on the computer running Streamlit, not the browser's microphone. "
+        "Start begins a new transcript. Stop, Clear, and Back stop capture before proceeding. "
+        "A disconnected/inactive workspace triggers shutdown after 30 seconds."
+    )
+    _live_panel()
